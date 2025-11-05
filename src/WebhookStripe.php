@@ -2,6 +2,8 @@
 require __DIR__ . '/../vendor/autoload.php';
 require_once __DIR__ . '/InvoiceBuilder.php';
 require_once __DIR__ . '/nav_helpers.php';
+require_once __DIR__ . '/pdf_helpers.php';
+require_once __DIR__ . '/email_helpers.php';
 
 use Stripe\Webhook;
 use Stripe\Stripe;
