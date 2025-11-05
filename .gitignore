@@ -1,0 +1,5 @@
+.env
+logs/
+vendor/
+composer.json
+composer.lock
