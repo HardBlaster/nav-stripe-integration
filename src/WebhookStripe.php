@@ -1,5 +1,7 @@
 <?php
 require __DIR__ . '/../vendor/autoload.php';
+require_once __DIR__ . '/InvoiceBuilder.php';
+require_once __DIR__ . '/nav_helpers.php';
 
 use Stripe\Webhook;
 use Stripe\Stripe;
@@ -67,7 +69,7 @@ function handleInvoicePaymentSucceeded($invoiceObject) {
     // 6️⃣ NAV XML generálása (AAM)
     try {
         $xml = InvoiceBuilder::buildInvoiceXml($stripeData);
-        $xmlPath = __DIR__ . '/../logs/invoice_preview.xml';
+        $xmlPath = __DIR__ . '/../logs/invoice_' . $stripeData['invoiceNumber'] . '.xml';
         file_put_contents($xmlPath, $xml);
 
         file_put_contents(__DIR__ . '/../logs/webhook.log',
@@ -93,7 +95,98 @@ function handleInvoicePaymentSucceeded($invoiceObject) {
         FILE_APPEND
     );
 
-    // 8️⃣ (Opcionális) A következő lépésben itt fog bekapcsolódni a NAV beküldés.
+    $invoiceData = [
+        'invoiceNumber' => $stripeData['invoiceNumber'],
+        'issueDate' => date('Y-m-d'),
+        'deliveryDate' => date('Y-m-d'),
+        'currency' => $stripeData['currency'],
+        'paymentMethod' => $paymentIntent->payment_method_types[0] ?? 'card',
+        'paymentDueDate' => date('Y-m-d'),
+        'seller' => [
+            'name' => $_ENV['SELLER_NAME'],
+            'taxNumber' => $_ENV['SELLER_TAX_NUMBER'],
+            'address' => [
+                'postalCode' => $_ENV['SELLER_ADDRESS_POSTCODE'],
+                'city' => $_ENV['SELLER_ADDRESS_CITY'],
+                'street' => $_ENV['SELLER_ADDRESS_STREET'],
+                'countryCode' => $_ENV['SELLER_COUNTRY_CODE']
+            ]
+        ],
+        'buyer' => $buyerData,
+        'items' => array_map(fn($i) => [
+            'desc' => $i['description'],
+            'qty' => $i['quantity'],
+            'unit' => 'db',
+            'net' => $i['amountNet'],
+        ], $items),
+        'totals' => [
+            'net' => $total,
+            'vat' => 0,
+            'gross' => $total,
+            'vatRateLabel' => 'AAM'
+        ]
+    ];
+
+    // 8️⃣ A következő lépésben itt fog bekapcsolódni a NAV beküldés.
+    try {
+        $config = createNavConfig();
+        $reporter = new \NavOnlineInvoice\Reporter($config);
+
+        // --- XML validálás (opcionális, de ajánlott)
+        $validationErrors = $reporter->getInvoiceValidationError($xml);
+        if (!empty($validationErrors)) {
+            file_put_contents(__DIR__ . '/../logs/webhook.log',
+                date('c') . " - NAV XML validation errors: " . implode('; ', $validationErrors) . "\n",
+                FILE_APPEND
+            );
+            // Nem küldjük be a hibás XML-t
+            return;
+        }
+
+        // --- Beküldés (CREATE)
+        $operations = new \NavOnlineInvoice\InvoiceOperations();
+        $operations->add(new \NavOnlineInvoice\InvoiceOperation($xml, "CREATE"));
+
+        $result = $reporter->manageInvoice($operations);
+        $transactionId = $result['transactionId'] ?? null;
+
+        // --- Logolás
+        file_put_contents(__DIR__ . '/../logs/webhook.log',
+            date('c') . " - NAV manageInvoice CREATE sent. Transaction ID: {$transactionId}\n",
+            FILE_APPEND
+        );
+
+        // --- Debug mentés (request/response)
+        $debug = $reporter->getLastRequestData();
+        file_put_contents(__DIR__ . '/../logs/nav_request_' . $stripeData['invoiceNumber'] . '.json',
+            json_encode($debug, JSON_PRETTY_PRINT)
+        );
+
+        // --- Transaction ID elmentése külön
+        if ($transactionId) {
+            file_put_contents(__DIR__ . '/../logs/last_transaction_id.txt', $transactionId . PHP_EOL, FILE_APPEND);
+        }
+
+    } catch (Throwable $e) {
+        file_put_contents(__DIR__ . '/../logs/webhook.log',
+            date('c') . " - NAV send error: {$e->getMessage()}\n", FILE_APPEND
+        );
+        // Hibánál nem áll le a folyamat (megy tovább PDF/E-mail)
+    }
+
+    try {
+        $pdfPath = __DIR__ . '/../logs/invoice_' . $stripeData['invoiceNumber'] . '.pdf';
+        generateInvoicePdf($invoiceData, $pdfPath);
+        sendInvoiceEmail($invoiceData, $pdfPath);
+
+        file_put_contents(__DIR__ . '/../logs/webhook.log',
+            date('c') . " - Email sent with attached PDF: {$pdfPath}\n", FILE_APPEND);
+
+    } catch (Throwable $e) {
+        file_put_contents(__DIR__ . '/../logs/webhook.log',
+            date('c') . " - PDF/Email error: {$e->getMessage()}\n", FILE_APPEND);
+    }
+
 }
 
 $dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
