@@ -4,26 +4,36 @@ require_once __DIR__ . '/InvoiceBuilder.php';
 require_once __DIR__ . '/nav_helpers.php';
 require_once __DIR__ . '/pdf_helpers.php';
 require_once __DIR__ . '/email_helpers.php';
+require_once __DIR__ . '/invoice_sequence.php';
 
 use Stripe\Webhook;
 use Stripe\Stripe;
 use Stripe\Invoice;
 use Stripe\Customer;
-use Stripe\PaymentIntent;
 
 function handleInvoicePaymentSucceeded($invoiceObject) {
     try {
         // 1️⃣ Stripe inicializálás
         Stripe::setApiKey($_ENV['STRIPE_SECRET_KEY']);
 
+        file_put_contents(__DIR__ . '/../logs/webhook.log', date('c') . " - EVENT DATA OBJECT:\n{$invoiceObject}\n", FILE_APPEND);
+
         // 2️⃣ Adatok lekérése
         $invoiceId = $invoiceObject->id;
-        $invoice = Invoice::retrieve($invoiceId);
-        $customer = Customer::retrieve($invoice->customer);
-        $paymentIntent = PaymentIntent::retrieve($invoice->payment_intent);
-
         file_put_contents(__DIR__ . '/../logs/webhook.log',
-            date('c') . " - Stripe data retrieved for invoice: {$invoiceId}\n",
+            date('c') . " - Stripe invoice id: {$invoiceId}\n",
+            FILE_APPEND
+        );
+
+        $invoice = Invoice::retrieve($invoiceId);
+        file_put_contents(__DIR__ . '/../logs/webhook.log',
+            date('c') . " - INVOICE:\n{$invoice}\n",
+            FILE_APPEND
+        );
+
+        $customer = Customer::retrieve($invoice->customer);
+        file_put_contents(__DIR__ . '/../logs/webhook.log',
+            date('c') . " - CUSTOMER:\n{$customer}\n",
             FILE_APPEND
         );
 
@@ -32,7 +42,7 @@ function handleInvoicePaymentSucceeded($invoiceObject) {
             date('c') . " - Stripe API error: {$e->getMessage()}\n",
             FILE_APPEND
         );
-        return; // ne folytassa a feldolgozást
+        return; 
     }
 
     // 3️⃣ Vevőadatok összeállítása
@@ -44,9 +54,9 @@ function handleInvoicePaymentSucceeded($invoiceObject) {
         'type' => $isBusiness ? 'company' : 'private',
         'address' => [
             'countryCode' => $customer->address->country ?? 'HU',
-            'postalCode' => $customer->address->postal_code ?? '',
-            'city' => $customer->address->city ?? '',
-            'street' => trim(($customer->address->line1 ?? '') . ' ' . ($customer->address->line2 ?? ''))
+            'postalCode' => $customer->address->postal_code ?? '1111',
+            'city' => $customer->address->city ?? 'BP',
+            'street' => trim(($customer->address->line1 ?? 'Itten lakok 12.') . ' ' . ($customer->address->line2 ?? ''))
         ]
     ];
 
@@ -62,7 +72,7 @@ function handleInvoicePaymentSucceeded($invoiceObject) {
 
     // 5️⃣ Stripe adatok strukturálása az InvoiceBuilder-hez
     $stripeData = [
-        'invoiceNumber' => $invoice->number ?? ('INV-' . time()),
+        'invoiceNumber' => getNextInvoiceNumber(),
         'currency' => strtoupper($invoice->currency),
         'customer' => $buyerData,
         'items' => $items,
@@ -102,7 +112,7 @@ function handleInvoicePaymentSucceeded($invoiceObject) {
         'issueDate' => date('Y-m-d'),
         'deliveryDate' => date('Y-m-d'),
         'currency' => $stripeData['currency'],
-        'paymentMethod' => $paymentIntent->payment_method_types[0] ?? 'card',
+        'paymentMethod' => 'card',
         'paymentDueDate' => date('Y-m-d'),
         'seller' => [
             'name' => $_ENV['SELLER_NAME'],
@@ -135,22 +145,10 @@ function handleInvoicePaymentSucceeded($invoiceObject) {
         $reporter = new \NavOnlineInvoice\Reporter($config);
 
         // --- XML validálás (opcionális, de ajánlott)
-        $validationErrors = $reporter->getInvoiceValidationError($xml);
-        if (!empty($validationErrors)) {
-            file_put_contents(__DIR__ . '/../logs/webhook.log',
-                date('c') . " - NAV XML validation errors: " . implode('; ', $validationErrors) . "\n",
-                FILE_APPEND
-            );
-            // Nem küldjük be a hibás XML-t
-            return;
-        }
+        $xmlObj = simplexml_load_string($xml);
 
         // --- Beküldés (CREATE)
-        $operations = new \NavOnlineInvoice\InvoiceOperations();
-        $operations->add(new \NavOnlineInvoice\InvoiceOperation($xml, "CREATE"));
-
-        $result = $reporter->manageInvoice($operations);
-        $transactionId = $result['transactionId'] ?? null;
+        $transactionId = $reporter->manageInvoice($xmlObj, "CREATE");
 
         // --- Logolás
         file_put_contents(__DIR__ . '/../logs/webhook.log',
@@ -171,7 +169,7 @@ function handleInvoicePaymentSucceeded($invoiceObject) {
 
     } catch (Throwable $e) {
         file_put_contents(__DIR__ . '/../logs/webhook.log',
-            date('c') . " - NAV send error: {$e->getMessage()}\n", FILE_APPEND
+            date('c') . " - NAV send error: {$e}\n", FILE_APPEND
         );
         // Hibánál nem áll le a folyamat (megy tovább PDF/E-mail)
     }
@@ -213,6 +211,7 @@ try {
         date('c') . " - Verified event: {$event->type}\n",
         FILE_APPEND
     );
+
 } catch (\UnexpectedValueException $e) {
     file_put_contents(__DIR__ . '/../logs/webhook.log', date('c') . " - Invalid payload\n", FILE_APPEND);
     http_response_code(400);

@@ -6,7 +6,7 @@ function generateInvoicePdf(array $invoiceData, string $outputPath): string {
     // 1) HTML render (PHP template)
     ob_start();
     $data = $invoiceData;
-    include __DIR__ . '/../resources/invoice_template.html.php';
+    include __DIR__ . '/resources/invoice_template.html.php';
     $html = ob_get_clean();
 
     // 2) Dompdf beállítások (A4, ékezet)
